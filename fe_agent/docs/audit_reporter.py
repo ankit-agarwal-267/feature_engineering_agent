@@ -35,27 +35,22 @@ class AuditReporter:
         content.append(f"- Input shape: {log.dataset_shape[0]} rows x {len(profiles)} cols")
         content.append(f"- Output shape: {log.dataset_shape[0]} rows x {transformed_df.shape[1]} cols")
         content.append(f"- Task type: {log.task_type}")
+# Section 2: Predictive Power Metrics
+if log.llm_advisory and "feature_importance_ranking" in log.llm_advisory:
+    content.append("\n## 2. Predictive Power Metrics")
+    content.append("| Feature | Mutual Info | ANOVA (F-Test) | Cramer's V |")
+    content.append("|---|---|---|---|")
+    ranking = log.llm_advisory["feature_importance_ranking"]
 
-        # Section 2: Predictive Power Metrics
-        if log.llm_advisory and "feature_importance_ranking" in log.llm_advisory:
-            content.append("\n## 2. Predictive Power Metrics")
-            content.append("| Feature | Mutual Info | IV | Correlation (r) | Interpretation |")
-            content.append("|---|---|---|---|---|")
-            ranking = log.llm_advisory["feature_importance_ranking"]
-            
-            sorted_feats = sorted(ranking.items(), key=lambda x: (x[1].get('mi', 0), x[1].get('iv', 0)), reverse=True)
-            for feat, metrics in sorted_feats[:50]:
-                mi = metrics.get('mi', 0)
-                iv = metrics.get('iv', 0)
-                corr = metrics.get('corr', 0)
-                
-                if iv < 0.02: interp = "Useless"
-                elif iv < 0.1: interp = "Weak"
-                elif iv < 0.3: interp = "Medium"
-                elif iv < 0.5: interp = "Strong"
-                else: interp = "Suspicious"
-                
-                content.append(f"| {feat} | {self._format_metric(mi)} | {self._format_metric(iv)} | {self._format_metric(corr)} | {interp} |")
+    # Sort by MI
+    sorted_feats = sorted(ranking.items(), key=lambda x: x[1].get('mi', 0), reverse=True)
+    for feat, metrics in sorted_feats[:50]:
+        mi = metrics.get('mi', 0)
+        anova = metrics.get('anova', 0)
+        cramer = metrics.get('cramer', 0)
+
+        content.append(f"| {feat} | {self._format_metric(mi)} | {self._format_metric(anova)} | {self._format_metric(cramer)} |")
+
 
         # Section 3: LLM Advisor Reasoning
         if log.llm_advisory and "llm_review" in log.llm_advisory:
