@@ -35,22 +35,17 @@ class AuditReporter:
         content.append(f"- Input shape: {log.dataset_shape[0]} rows x {len(profiles)} cols")
         content.append(f"- Output shape: {log.dataset_shape[0]} rows x {transformed_df.shape[1]} cols")
         content.append(f"- Task type: {log.task_type}")
-# Section 2: Predictive Power Metrics
-if log.llm_advisory and "feature_importance_ranking" in log.llm_advisory:
-    content.append("\n## 2. Predictive Power Metrics")
-    content.append("| Feature | Mutual Info | ANOVA (F-Test) | Cramer's V |")
-    content.append("|---|---|---|---|")
-    ranking = log.llm_advisory["feature_importance_ranking"]
 
-    # Sort by MI
-    sorted_feats = sorted(ranking.items(), key=lambda x: x[1].get('mi', 0), reverse=True)
-    for feat, metrics in sorted_feats[:50]:
-        mi = metrics.get('mi', 0)
-        anova = metrics.get('anova', 0)
-        cramer = metrics.get('cramer', 0)
-
-        content.append(f"| {feat} | {self._format_metric(mi)} | {self._format_metric(anova)} | {self._format_metric(cramer)} |")
-
+        # Section 2: Predictive Power Metrics
+        if log.llm_advisory and "feature_importance_ranking" in log.llm_advisory:
+            content.append("\n## 2. Predictive Power Metrics")
+            content.append("| Feature | MI | ANOVA | Cramer's V | IV | Corr |")
+            content.append("|---|---|---|---|---|---|")
+            ranking = log.llm_advisory["feature_importance_ranking"]
+            
+            sorted_feats = sorted(ranking.items(), key=lambda x: x[1].get('mi', 0), reverse=True)
+            for feat, metrics in sorted_feats[:50]:
+                content.append(f"| {feat} | {self._format_metric(metrics.get('mi'))} | {self._format_metric(metrics.get('anova'))} | {self._format_metric(metrics.get('cramer'))} | {self._format_metric(metrics.get('iv'))} | {self._format_metric(metrics.get('corr'))} |")
 
         # Section 3: LLM Advisor Reasoning
         if log.llm_advisory and "llm_review" in log.llm_advisory:
@@ -65,6 +60,8 @@ if log.llm_advisory and "feature_importance_ranking" in log.llm_advisory:
                             content.append(f"  - Rationale: {imp.get('rationale', 'N/A')}")
                     else:
                         content.append(f"```json\n{json.dumps(review, indent=2)}\n```")
+                else:
+                    content.append(f"> {review}")
 
         # Section 4: Data Quality & Health
         content.append("\n## 4. Data Quality & Health")
@@ -102,6 +99,7 @@ if log.llm_advisory and "feature_importance_ranking" in log.llm_advisory:
         interactions = [d for d in log.decisions if "interaction" in d.transform_name or d.rule_triggered == "USER_APPROVED"]
         if interactions:
             content.append("\n## 6. Cross-Feature Interactions & Polynomials")
+            content.append("The following interactions were generated based on predictive ranking and user approval:")
             for i in interactions:
                 content.append(f"- **{i.column_name}**: `{i.transform_name}` -> `{', '.join(i.output_columns)}`")
 
