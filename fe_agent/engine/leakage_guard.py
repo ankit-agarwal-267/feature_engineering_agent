@@ -37,11 +37,10 @@ class LeakageGuard:
     def _calculate_correlation(self, col: Any, target: Any) -> Optional[float]:
         try:
             if isinstance(col, pd.Series):
-                # Using Pearson for numeric; point-biserial would be better for categorical target
-                # but pandas .corr defaults to Pearson
+                if col.std() == 0 or target.std() == 0: return 0.0
                 return col.corr(target)
             else:
-                # Polars correlation
+                if col.std() == 0 or target.std() == 0: return 0.0
                 return pl.corr(col, target)
         except Exception:
             return None

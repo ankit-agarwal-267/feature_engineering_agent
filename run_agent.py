@@ -19,68 +19,123 @@ def main():
     parser.add_argument("--output_dir", default="./fe_output")
     args = parser.parse_args()
 
-    # PHASE 1: Initial Analysis
-    print("PHASE 1: Profiling and Recommendation...")
-    agent = FeatureEngineeringAgent(config=FEConfig(target_column=args.target))
-    analysis = agent.run(args.source, skip_io=True)
+    # PHASE 0: Initial Analysis
+    print("PHASE 0: Initial Analysis & Ranking...")
+    base_config = FEConfig(
+        target_column=args.target,
+        llm=LLMConfig(enabled=args.llm, provider="ollama", model="mistral:7b")
+    )
+    agent_base = FeatureEngineeringAgent(config=base_config)
+    analysis = agent_base.run(args.source, skip_io=True)
     
-    # PHASE 2: Selection
-    print("PHASE 2: HITL Feature Construction...")
+    # PHASE 1: Smart Construction Selection
     selected_ints, selected_polys = [], []
     
-    if args.interactions:
-        all_pairs = analysis.recommended_interactions.get("numeric", [])
-        user_choice = ask_user([{
-            "header": "Interactions", "type": "choice", "multiSelect": True,
-            "options": [{"label": f"{a} x {b}", "description": "Interaction"} for a, b in all_pairs],
-            "question": f"Select from {len(all_pairs)} interactions (A=All, N=None):"
-        }])
-        if user_choice and user_choice[0].get('value'):
-            selected_ints = [opt['label'].split(' x ') for opt in user_choice[0]['value']]
-
-    if args.polynomials:
-        all_poly = analysis.recommended_interactions.get("polynomial", [])
-        poly_opts = []
-        for pf in all_poly:
-            for deg in [1, 2, 3]: poly_opts.append({"label": f"{pf['col']} deg {deg}", "description": "Polynomial"})
+    if args.interactions or args.polynomials:
+        print("PHASE 1: Smart Feature Construction Selection...")
+        optimizer = DecisionOptimizer(None)
+        ranking = analysis.decision_log.llm_advisory["feature_importance_ranking"]
         
-        user_choice = ask_user([{
-            "header": "Polynomials", "type": "choice", "multiSelect": True,
-            "options": poly_opts,
-            "question": f"Select polynomials (A=All, N=None):"
-        }])
-        if user_choice and user_choice[0].get('value'):
-            for opt in user_choice[0]['value']:
-                parts = opt['label'].split(' ')
+        # A. Rule-Based Recommendations
+        rule_recs = optimizer.get_construction_recommendations(ranking, analysis.column_profiles)
+        
+        # B. LLM Recommendations (Optional)
+        llm_recs = None
+        if args.llm:
+            llm_recs = agent_base.llm_advisor.get_construction_advice(ranking)
+
+        # C. Unify Recommendations for Prompt
+        questions = []
+        if args.interactions:
+            # Mark recommendations
+            rule_pairs = set([tuple(sorted(p)) for p in rule_recs["interactions"]])
+            llm_pairs = set([tuple(sorted(p)) for p in llm_recs["interactions"]]) if llm_recs and "interactions" in llm_recs else set()
+            
+            # Full pool
+            all_feats = [p.name for p in analysis.column_profiles if p.name != args.target and p.semantic_type != SemanticType.DATETIME]
+            all_possible = [(all_feats[i], all_feats[j]) for i in range(len(all_feats)) for j in range(i+1, len(all_feats))]
+            
+            int_options = []
+            for a, b in all_possible:
+                pair = tuple(sorted((a,b)))
+                is_rule = pair in rule_pairs
+                is_llm = pair in llm_pairs
+                
+                prefix = ""
+                if is_rule: prefix += "[Rule]"
+                if is_llm: prefix += "[LLM]"
+                
+                label = f"{a} x {b}"
+                if prefix: label = f"{prefix} {label}"
+                int_options.append({"label": label, "description": "Interaction", "is_rec": (is_rule or is_llm)})
+                
+            questions.append({
+                "header": "Interactions", "type": "choice", "multiSelect": True,
+                "options": int_options,
+                "question": "Select interactions (R=All Recommended, A=All Possible, N=None):"
+            })
+
+        if args.polynomials:
+            rule_poly = set(rule_recs["polynomials"])
+            llm_poly = set([p['col'] if isinstance(p, dict) else p for p in llm_recs["polynomials"]]) if llm_recs and "polynomials" in llm_recs else set()
+            
+            all_numeric = [p.name for p in analysis.column_profiles if p.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE)]
+            poly_options = []
+            for col in all_numeric:
+                is_rule = col in rule_poly
+                is_llm = col in llm_poly
+                prefix = ""
+                if is_rule: prefix += "[Rule]"
+                if is_llm: prefix += "[LLM]"
+                
+                for deg in [1, 2, 3]:
+                    label = f"{col} deg {deg}"
+                    if prefix: label = f"{prefix} {label}"
+                    poly_options.append({"label": label, "description": "Polynomial", "is_rec": (is_rule or is_llm)})
+
+            questions.append({
+                "header": "Polynomials", "type": "choice", "multiSelect": True,
+                "options": poly_options,
+                "question": "Select polynomials (R=All Recommended, A=All Possible, N=None):"
+            })
+
+        # D. Capture Input with shortcuts
+        # Overriding ask_user here for 'R' shortcut
+        user_choices = ask_user_construction(questions)
+        
+        # Parse choices
+        if args.interactions and len(user_choices) > 0:
+            for opt in user_choices[0]['value']:
+                clean_label = opt['label'].split(']')[-1].strip()
+                selected_ints.append(clean_label.split(' x '))
+        poly_idx = 1 if args.interactions else 0
+        if args.polynomials and len(user_choices) > poly_idx:
+            for opt in user_choices[poly_idx]['value']:
+                # Clean label: "[Rule][LLM] col deg 2" -> "col deg 2"
+                clean_label = opt['label'].split(']')[-1].strip()
+                parts = clean_label.split(' ')
                 selected_polys.append({'col': parts[0], 'degree': int(parts[2])})
 
-    # PHASE 3: Transformation and Final Review
-    print("PHASE 3: Transformation and Final Review...")
+    # PHASE 2: Transformation
+    print("PHASE 2: Applying Transformations...")
     final_config = FEConfig(
         target_column=args.target, output_dir=args.output_dir,
         selected_interactions=selected_ints,
         selected_polynomial_features=selected_polys,
         llm=LLMConfig(enabled=args.llm)
     )
-    final_agent = FeatureEngineeringAgent(config=final_config)
-    final_result = final_agent.run(args.source)
+    agent_final = FeatureEngineeringAgent(config=final_config)
+    final_result = agent_final.run(args.source)
 
-    # 4. Final Optimization (Unified Rationale)
+    # PHASE 3: Final Pruning
+    print(f"\nPHASE 3: Final Feature Pruning ({len(final_result.transformed_df.columns)} features)...")
     selection_rationale = final_result.decision_log.llm_advisory["selection_rationale"]
-
-    # C. Final HITL Prompt
-    print(f"\nFinal Feature Set: {len(final_result.transformed_df.columns)} features.")
-    pruning_options = []
-    for f, data in selection_rationale.items():
-        pruning_options.append({
-            "label": f"{f} ({data['status']})",
-            "description": data['rationale']
-        })
+    pruning_options = [{"label": f"{f} ({d['status']})", "description": d['rationale']} for f, d in selection_rationale.items()]
 
     user_final = ask_user([{
         "header": "Final Pruning", "type": "choice", "multiSelect": True,
         "options": pruning_options,
-        "question": "Select features to DROP (U=All Useless, W=Useless+Weak, N=Keep All):"
+        "question": "Select features to DROP (U=Useless, W=Weak, N=Keep All):"
     }])
     
     if user_final and user_final[0].get('value'):
@@ -90,10 +145,32 @@ def main():
         final_path = Path(args.output_dir) / f"final_dataset_{final_result.run_id}{ext}"
         if ext == '.parquet': final_df.to_parquet(final_path, index=False)
         else: final_df.to_csv(final_path, index=False)
-        print(f"Pruning complete. Final column count: {len(final_df.columns)}")
-        print(f"Final file: {final_path}")
+        print(f"Final column count: {len(final_df.columns)}. Saved to: {final_path}")
 
-    print(f"Process complete. Output saved to {args.output_dir}")
+    print(f"Done! Reports in {args.output_dir}")
+
+def ask_user_construction(questions):
+    results = []
+    for q in questions:
+        print(f"\n--- {q['header']} ---")
+        print(f"{q['question']}")
+        print(f"R: All Recommended")
+        print(f"A: All Possible")
+        print(f"N: None of the above")
+        for i, opt in enumerate(q['options']):
+            print(f"{i}: {opt['label']}")
+        
+        choice = input("\nChoice (R, A, N, or indices): ").strip().upper()
+        if choice == 'R': selected = [o for o in q['options'] if o.get('is_rec')]
+        elif choice == 'A': selected = q['options']
+        elif choice == 'N': selected = []
+        else:
+            try:
+                indices = [int(x.strip()) for x in choice.split(',') if x.strip()]
+                selected = [q['options'][i] for i in indices]
+            except: selected = []
+        results.append({'value': selected})
+    return results
 
 if __name__ == "__main__":
     main()

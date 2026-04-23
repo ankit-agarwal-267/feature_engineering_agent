@@ -83,10 +83,12 @@ class InformationValueScorer:
                 try:
                     if is_pandas:
                         col_numeric = pd.to_numeric(col_raw, errors='coerce').fillna(0)
-                        corr = float(col_numeric.corr(pd.Series(y_bin)))
+                        if col_numeric.std() > 0:
+                            corr = float(col_numeric.corr(pd.Series(y_bin)))
                     else:
                         col_numeric = col_raw.cast(pl.Float64, strict=False).fill_null(0)
-                        corr = float(pl.corr(col_numeric, pl.Series(y_bin)))
+                        if col_numeric.std() > 0:
+                            corr = float(pl.corr(col_numeric, pl.Series(y_bin)))
                 except: pass
 
             # 5. IV (Information Value - Binary only)
