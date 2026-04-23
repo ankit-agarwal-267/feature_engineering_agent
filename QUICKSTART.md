@@ -18,7 +18,7 @@ agent.run("data.csv")
 ```
 
 ## 4. Run with All Features
-Run the agent, and it will pause to ask you for interaction approvals based on MI and IV metrics:
+The agent is rule-based by default. To enable LLM reasoning, pass the `--llm` flag. You can change the model by modifying the `LLMConfig` in your driver script (default is `mistral:7b`):
 ```bash
 python run_agent.py --source data.csv --target y --llm --output_dir ./fe_output
 ```

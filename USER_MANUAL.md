@@ -50,5 +50,23 @@ The agent calculates the following for every feature (including interactions) to
 | 0.1 – 0.3 | Medium |
 | > 0.5 | Suspicious (Potential Leakage) |
 
-## Part 5 — Leakage Guard
-The agent proactively flags features with suspiciously high predictive metrics or those matching target naming heuristics.
+## Part 6 — LLM Advisor (Optional)
+The LLM Advisor is fully optional. If not configured, the agent relies entirely on its built-in rule-based heuristics.
+
+### Configuration
+To enable it, set `llm.enabled = True` in your `FEConfig`.
+
+- **Ollama (Default/Local):** No API key required.
+  ```python
+  llm=LLMConfig(enabled=True, provider="ollama", model="mistral:7b")
+  ```
+- **External Provider (e.g., OpenAI Compatible):**
+  ```python
+  llm=LLMConfig(
+      enabled=True, 
+      provider="openai_compat", 
+      model="gpt-4o",
+      base_url="https://api.openai.com/v1"
+  )
+  ```
+*Note: Ensure your environment variable or configuration provides the necessary API key for external providers.*
