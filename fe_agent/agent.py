@@ -29,6 +29,7 @@ from fe_agent.engine.transforms.interactions import InteractionTransformer
 from fe_agent.ask_user import ask_user
 from fe_agent.engine.leakage_guard import LeakageGuard
 from fe_agent.llm.llm_advisor import LLMAdvisor
+from fe_agent.engine.transforms.numeric import NumericTransformer
 
 @dataclass
 class LLMAdvisory:
@@ -50,31 +51,21 @@ class FEResult:
     run_id: str = ""
     warnings: List[str] = field(default_factory=list)
     llm_advisory: Optional[LLMAdvisory] = None
-    # For HITL
-    recommended_interactions: Dict[str, List[Any]] = field(default_factory=dict)
+    recommended_interactions: Dict[str, Any] = field(default_factory=dict)
 
 class FEJSONEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, (np.int64, np.int32, np.int16, np.int8)):
-            return int(obj)
-        if isinstance(obj, (np.float64, np.float32)):
-            return float(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        if isinstance(obj, SemanticType):
-            return str(obj)
+        if isinstance(obj, (np.int64, np.int32, np.int16, np.int8)): return int(obj)
+        if isinstance(obj, (np.float64, np.float32)): return float(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
+        if isinstance(obj, SemanticType): return str(obj)
         return super().default(obj)
-
-from fe_agent.engine.transforms.numeric import NumericTransformer
 
 class FeatureEngineeringAgent:
     def __init__(self, config: FEConfig, custom_transforms: Optional[List[Any]] = None):
         self.config = config
         self.custom_transforms = custom_transforms or []
-        self.loaders = [
-            CSVLoader(), ParquetLoader(), JSONLoader(), 
-            SQLLoader(), DictLoader()
-        ]
+        self.loaders = [CSVLoader(), ParquetLoader(), JSONLoader(), SQLLoader(), DictLoader()]
         self.numeric_transformer = NumericTransformer(config)
         self.interaction_transformer = InteractionTransformer(config)
         self.scorer = InformationValueScorer()
@@ -82,22 +73,16 @@ class FeatureEngineeringAgent:
         self.llm_advisor = LLMAdvisor(config)
         
     def _generate_run_id(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        hex_id = uuid.uuid4().hex[:8]
-        return f"{timestamp}_{hex_id}"
+        return f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
     def run(self, source: Union[str, Dict[str, Any], RawDataFrame], train_mask: Optional[Any] = None, skip_io: bool = False) -> FEResult:
-        """
-        Executes the feature engineering pipeline.
-        """
         run_id = self.config.run_id or self._generate_run_id()
         output_dir = Path(self.config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         
         # 1. Ingestion
         df = None
-        if isinstance(source, (pd.DataFrame, pl.DataFrame)):
-            df = source
+        if isinstance(source, (pd.DataFrame, pl.DataFrame)): df = source
         else:
             for loader in self.loaders:
                 if loader.supports(source):
@@ -108,118 +93,101 @@ class FeatureEngineeringAgent:
         # 2. Profiling & Overrides
         profiler = SchemaProfiler(self.config)
         profiles = profiler.profile(df)
-        resolver = OverrideResolver(self.config)
-        profiles = resolver.resolve(profiles)
+        profiles = OverrideResolver(self.config).resolve(profiles)
         
-        # 3. Decisions & Base Transforms
+        # 3. Decisions & Initial Metrics
         decision_engine = DecisionEngine(self.config)
         all_decisions = [d for p in profiles if p.name != self.config.target_column for d in decision_engine.decide(p)]
-        
-        # 4. LLM Advisor
-        llm_advisory_data = self.llm_advisor.review_decisions(profiles, all_decisions) if self.config.llm.enabled else None
-        
-        # 5. Ranking & Interaction Logic
         ranking_initial = self.scorer.score(df, self.config.target_column, profiles)
         
-        # All numeric features for interactions and polynomials
-        numeric_features = [p.name for p in profiles if p.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE)]
+        # 4. Interaction Discovery (Everything except DATETIME)
+        valid_feats = [p.name for p in profiles if p.name != self.config.target_column and p.semantic_type != SemanticType.DATETIME]
+        recommended_pairs = []
+        for i in range(len(valid_feats)):
+            for j in range(i+1, len(valid_feats)):
+                recommended_pairs.append((valid_feats[i], valid_feats[j]))
         
-        recommended_num = [(numeric_features[i], numeric_features[j]) for i in range(len(numeric_features)) for j in range(i+1, len(numeric_features))]
-        recommended_poly = [{"col": feat, "degrees": [1, 2, 3]} for feat in numeric_features]
+        recommended_poly = [{"col": p.name} for p in profiles if p.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE)]
+
+        # 5. Apply User Selections (Interactions & Polynomials)
+        new_cols_list = []
         
-        # Interaction / Poly application
-        if self.config.selected_numeric_interactions:
-            # Handle both numeric-numeric and numeric-categorical interactions
-            # For num-cat, we use group stats
-            for p in self.config.selected_numeric_interactions:
-                col_a, col_b = p[0], p[1]
-                # Check types
-                prof_a = next(p for p in profiles if p.name == col_a)
-                prof_b = next(p for p in profiles if p.name == col_b)
-                
-                if prof_a.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE) and \
-                   prof_b.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE):
-                    int_df = self.interaction_transformer.generate_numeric_interactions(df, [tuple(p)])
-                    df = pd.concat([df, int_df], axis=1) if isinstance(df, pd.DataFrame) else pl.concat([transformed_df, int_df], how="horizontal")
-                elif 'cat' in prof_a.semantic_type or 'cat' in prof_b.semantic_type:
-                    # Generic Categorical interaction (Group Stats if mixed, or Concatenation if both categorical)
-                    if 'cat' in prof_a.semantic_type and 'cat' in prof_b.semantic_type:
-                        int_df = self.interaction_transformer.generate_categorical_interactions(df, [tuple(p)])
-                        df = pd.concat([df, int_df], axis=1) if isinstance(df, pd.DataFrame) else pl.concat([df, int_df], how="horizontal")
-                    else:
-                        cat, num = (col_a, col_b) if 'cat' in prof_a.semantic_type else (col_b, col_a)
-                        grp_df = self.interaction_transformer.generate_group_stats(df, cat, num, ["mean", "std"])
-                        df = pd.concat([df, grp_df], axis=1) if isinstance(df, pd.DataFrame) else pl.concat([df, grp_df], how="horizontal")
+        # Apply Interactions
+        for pair in self.config.selected_interactions:
+            col_a, col_b = pair[0], pair[1]
+            p_a = next(p for p in profiles if p.name == col_a)
+            p_b = next(p for p in profiles if p.name == col_b)
+            is_num_a = p_a.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE)
+            is_num_b = p_b.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE)
+            
+            if is_num_a and is_num_b:
+                res_df = self.interaction_transformer.generate_numeric_interactions(df, [(col_a, col_b)])
+            elif not is_num_a and not is_num_b:
+                res_df = self.interaction_transformer.generate_categorical_interactions(df, [(col_a, col_b)])
+            else:
+                cat, num = (col_a, col_b) if not is_num_a else (col_b, col_a)
+                res_df = self.interaction_transformer.generate_group_stats(df, cat, num, ["mean", "std"])
+            
+            new_cols_list.append(res_df)
+            all_decisions.append(DecisionRecord(f"{col_a}, {col_b}", "interaction", list(res_df.columns), "accepted", "USER", "User selected interaction."))
 
-                all_decisions.append(DecisionRecord(column_name=f"{col_a}, {col_b}", transform_name="interaction", output_columns=[], decision="accepted", rule_triggered="USER_APPROVED", rationale="User approved interaction."))
+        # Apply Polynomials
+        for item in self.config.selected_polynomial_features:
+            col, deg = item['col'], item['degree']
+            p = next(p for p in profiles if p.name == col)
+            res_val = self.numeric_transformer.apply_polynomial(df[col], p, deg)
+            if res_val is not None:
+                name = f"{col}_pow_{deg}"
+                poly_df = pd.DataFrame({name: res_val}) if isinstance(df, pd.DataFrame) else pl.DataFrame({name: res_val})
+                new_cols_list.append(poly_df)
+                all_decisions.append(DecisionRecord(col, f"polynomial_d{deg}", [name], "accepted", "USER", f"User selected degree {deg}."))
 
-        if self.config.selected_polynomial_features:
-            for item in self.config.selected_polynomial_features:
-                col_name, degree = item['col'], item['degree']
-                profile = next((p for p in profiles if p.name == col_name), None)
-                if not profile: continue
-                
-                poly_val = self.numeric_transformer.apply_polynomial(df[col_name], profile, degree)
-                if poly_val is not None:
-                    out_name = f"{col_name}_pow_{degree}"
-                    df[out_name] = poly_val
-                    all_decisions.append(DecisionRecord(column_name=col_name, transform_name=f"polynomial_d{degree}", output_columns=[out_name], decision="accepted", rule_triggered="USER_APPROVED", rationale=f"Polynomial applied."))
+        # Single Concatenation to prevent fragmentation
+        if new_cols_list:
+            if isinstance(df, pd.DataFrame): df = pd.concat([df] + new_cols_list, axis=1)
+            else: df = pl.concat([df] + new_cols_list, how="horizontal")
 
-        # Re-profile after raw interactions
+        # 6. Transformation (Standard Rules)
         profiles = profiler.profile(df)
-        
-        fe_engine = FEEngine(self.config)
-        transformed_df, pipeline = fe_engine.transform(df, profiles, all_decisions, train_mask)
+        transformed_df, pipeline = FEEngine(self.config).transform(df, profiles, all_decisions, train_mask)
 
-        # 6. Final Pass (Scoring & Leakage)
-        # We need to score ALL features that are present in the final dataset.
-        # Ensure that profiles are also updated for all final features.
-        final_profiles = SchemaProfiler(self.config).profile(transformed_df)
+        # 7. Final Assembly & Export
+        final_profiles = profiler.profile(transformed_df)
         ranking_final = self.scorer.score(transformed_df, self.config.target_column, final_profiles)
         leakage_warnings = self.leakage_guard.check_leakage(transformed_df, self.config.target_column)
+        llm_advisory = self.llm_advisor.review_decisions(profiles, all_decisions) if self.config.llm.enabled else None
+        llm_pruning = self.llm_advisor.get_pruning_advice(ranking_final) if self.config.llm.enabled else None
+        
+        from fe_agent.decisions.decision_optimizer import DecisionOptimizer
+        selection_rationale = DecisionOptimizer(self.config).get_baseline_selection(ranking_final)
+        
+        # Merge LLM Pruning Feedback
+        if llm_pruning and isinstance(llm_pruning, dict) and "feedback" in llm_pruning:
+            for item in llm_pruning["feedback"]:
+                feat = item.get('feature')
+                if feat in selection_rationale:
+                    reason = item.get('reason', 'LLM Insight')
+                    action = item.get('action', 'keep').lower()
+                    current_rationale = selection_rationale[feat]['rationale']
+                    selection_rationale[feat]['rationale'] = f"[LLM] {reason} | {current_rationale}"
+                    if action == 'drop': selection_rationale[feat]['status'] = "drop_llm"
 
-        # 7. Output Assembly
-        config_hash = hashlib.sha256(json.dumps(self.config.model_dump(), sort_keys=True).encode()).hexdigest()
-        log = DecisionLog(
-            run_id=run_id, timestamp=datetime.now().isoformat(), config_hash=config_hash,
-            dataset_shape=list(transformed_df.shape), target_column=self.config.target_column, task_type=self.config.task_type,
-            decisions=all_decisions, leakage_warnings=leakage_warnings,
-            llm_advisory={"feature_importance_ranking": ranking_final, "llm_review": llm_advisory_data}
-        )
+        log = DecisionLog(run_id, datetime.now().isoformat(), hashlib.sha256(json.dumps(self.config.model_dump(), sort_keys=True).encode()).hexdigest(),
+                          list(transformed_df.shape), self.config.target_column, self.config.task_type, all_decisions, leakage_warnings, 
+                          {"feature_importance_ranking": ranking_final, "llm_review": llm_advisory, "llm_pruning": llm_pruning, "selection_rationale": selection_rationale})
         
-        if not skip_io and self.config.write_audit_report:
-            AuditReporter(run_id, output_dir).generate_report(log, profiles, transformed_df)
-        if not skip_io and self.config.write_decision_log:
-            with open(output_dir / f"decision_log_{run_id}.json", 'w', encoding='utf-8') as f:
-                json.dump(asdict(log), f, indent=2, cls=FEJSONEncoder)
-        
-        # Save Transformed Dataset
         if not skip_io:
-            # Determine output format based on input source
-            if isinstance(source, str) and (source.lower().endswith(('.csv', '.parquet', '.pq', '.txt', '.tsv'))):
-                ext = Path(source).suffix.lower()
-                if ext == '.pq': ext = '.parquet'
-            else:
-                ext = '.csv' # Default for SQL/Dict
-
-            output_path = output_dir / f"transformed_data_{run_id}{ext}"
-
+            if self.config.write_audit_report: AuditReporter(run_id, output_dir).generate_report(log, profiles, transformed_df)
+            if self.config.write_decision_log:
+                with open(output_dir / f"decision_log_{run_id}.json", 'w', encoding='utf-8') as f: json.dump(asdict(log), f, indent=2, cls=FEJSONEncoder)
+            
+            ext = Path(source).suffix.lower() if isinstance(source, str) else '.csv'
+            out_path = output_dir / f"transformed_data_{run_id}{ext}"
             if isinstance(transformed_df, pd.DataFrame):
-                if ext == '.parquet':
-                    transformed_df.to_parquet(output_path, index=False)
-                elif ext in ('.txt', '.csv', '.tsv'):
-                    transformed_df.to_csv(output_path, index=False)
+                if ext == '.parquet': transformed_df.to_parquet(out_path, index=False)
+                else: transformed_df.to_csv(out_path, index=False)
             else:
-                if ext == '.parquet':
-                    transformed_df.write_parquet(output_path)
-                else:
-                    transformed_df.write_csv(output_path)
+                if ext == '.parquet': transformed_df.write_parquet(out_path)
+                else: transformed_df.write_csv(out_path)
 
-            print(f"Transformed dataset saved to: {output_path}")
-
-
-        return FEResult(
-            transformed_df=transformed_df, decision_log=log, column_profiles=profiles,
-            pipeline_artifact=pipeline, output_dir=output_dir, run_id=run_id,
-            recommended_interactions={"numeric": recommended_num, "polynomial": recommended_poly, "ranking": ranking_initial}
-        )
+        return FEResult(transformed_df, log, profiles, pipeline, output_dir, run_id, recommended_interactions={"numeric": recommended_pairs, "polynomial": recommended_poly})

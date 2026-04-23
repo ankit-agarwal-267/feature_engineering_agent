@@ -64,8 +64,17 @@ class AuditReporter:
                 else:
                     content.append(f"> {review}")
 
-        # Section 4: Data Quality & Health
-        content.append("\n## 4. Data Quality & Health")
+        # Section 4: Feature Selection Rationale (New)
+        if log.llm_advisory and "selection_rationale" in log.llm_advisory:
+            content.append("\n## 4. Feature Selection Rationale")
+            content.append("| Feature | Status | Reasoning / Insight |")
+            content.append("|---|---|---|")
+            rationale_map = log.llm_advisory["selection_rationale"]
+            for feat, data in rationale_map.items():
+                content.append(f"| {feat} | {data.get('status')} | {data.get('rationale')} |")
+
+        # Section 5: Data Quality & Health
+        content.append("\n## 5. Data Quality & Health")
         quasi_constants = [p.name for p in profiles if p.semantic_type == SemanticType.CONSTANT]
         if quasi_constants:
             content.append(f"- **Dropped (Constant/Quasi-constant):** {', '.join(quasi_constants)}")
