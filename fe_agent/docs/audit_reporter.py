@@ -42,10 +42,11 @@ class AuditReporter:
             content.append("| Feature | MI | ANOVA | Cramer's V | IV | Corr |")
             content.append("|---|---|---|---|---|---|")
             ranking = log.llm_advisory["feature_importance_ranking"]
-            
+            # Sort by MI
             sorted_feats = sorted(ranking.items(), key=lambda x: x[1].get('mi', 0), reverse=True)
-            for feat, metrics in sorted_feats[:50]:
+            for feat, metrics in sorted_feats:
                 content.append(f"| {feat} | {self._format_metric(metrics.get('mi'))} | {self._format_metric(metrics.get('anova'))} | {self._format_metric(metrics.get('cramer'))} | {self._format_metric(metrics.get('iv'))} | {self._format_metric(metrics.get('corr'))} |")
+
 
         # Section 3: LLM Advisor Reasoning
         if log.llm_advisory and "llm_review" in log.llm_advisory:

@@ -48,11 +48,14 @@ class NumericTransformer:
         if degree < 1 or degree > 3:
             return None
             
+        # Ensure input is numeric
         if isinstance(col_data, pd.Series):
-            res = col_data ** degree
+            col_num = pd.to_numeric(col_data, errors='coerce').fillna(0)
+            res = col_num ** degree
             return res.astype('float32')
         else:
-            return (col_data ** degree).alias(f"{profile.name}_pow_{degree}").cast(pl.Float32)
+            col_num = col_data.cast(pl.Float64, strict=False).fill_null(0)
+            return (col_num ** degree).alias(f"{profile.name}_pow_{degree}").cast(pl.Float32)
 
     def apply_binning(self, col_data: Any, profile: ColumnProfile) -> Optional[RawDataFrame]:
         """

@@ -114,69 +114,62 @@ class FeatureEngineeringAgent:
         # 3. Decisions & Base Transforms
         decision_engine = DecisionEngine(self.config)
         all_decisions = [d for p in profiles if p.name != self.config.target_column for d in decision_engine.decide(p)]
-        fe_engine = FEEngine(self.config)
-        transformed_df, pipeline = fe_engine.transform(df, profiles, all_decisions, train_mask)
         
         # 4. LLM Advisor
         llm_advisory_data = self.llm_advisor.review_decisions(profiles, all_decisions) if self.config.llm.enabled else None
         
         # 5. Ranking & Interaction Logic
         ranking_initial = self.scorer.score(df, self.config.target_column, profiles)
-        top_features = list(ranking_initial.keys())[:self.config.interaction_top_n]
         
-        # Recommended Numeric Pairs
-        recommended_num = []
-        if len(top_features) >= 2:
-            recommended_num = [(top_features[i], top_features[j]) for i in range(len(top_features)) for j in range(i+1, len(top_features))]
-
-        # Recommended Polynomial Features
-        recommended_poly = []
-        if top_features:
-            recommended_poly = [{"col": feat, "degrees": [2, 3]} for feat in top_features]
-
-        # Apply interactions if provided in config
+        # All numeric features for interactions and polynomials
+        numeric_features = [p.name for p in profiles if p.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE)]
+        
+        recommended_num = [(numeric_features[i], numeric_features[j]) for i in range(len(numeric_features)) for j in range(i+1, len(numeric_features))]
+        recommended_poly = [{"col": feat, "degrees": [1, 2, 3]} for feat in numeric_features]
+        
+        # Interaction / Poly application
         if self.config.selected_numeric_interactions:
-            # Filter pairs where BOTH columns exist in transformed_df
-            valid_num_pairs = [tuple(p) for p in self.config.selected_numeric_interactions 
-                               if p[0] in transformed_df.columns and p[1] in transformed_df.columns]
-            
-            if valid_num_pairs:
-                int_df = self.interaction_transformer.generate_numeric_interactions(transformed_df, valid_num_pairs)
-                if isinstance(transformed_df, pd.DataFrame):
-                    transformed_df = pd.concat([transformed_df, int_df], axis=1)
-                else:
-                    transformed_df = pl.concat([transformed_df, int_df], how="horizontal")
+            # Handle both numeric-numeric and numeric-categorical interactions
+            # For num-cat, we use group stats
+            for p in self.config.selected_numeric_interactions:
+                col_a, col_b = p[0], p[1]
+                # Check types
+                prof_a = next(p for p in profiles if p.name == col_a)
+                prof_b = next(p for p in profiles if p.name == col_b)
                 
-                for p in valid_num_pairs:
-                    all_decisions.append(DecisionRecord(
-                        column_name=f"{p[0]}, {p[1]}", transform_name="numeric_interaction", 
-                        output_columns=[f"{p[0]}_x_{p[1]}"], decision="accepted", 
-                        rule_triggered="USER_APPROVED", rationale="User approved interaction."))
+                if prof_a.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE) and \
+                   prof_b.semantic_type in (SemanticType.NUMERIC_CONTINUOUS, SemanticType.NUMERIC_DISCRETE):
+                    int_df = self.interaction_transformer.generate_numeric_interactions(df, [tuple(p)])
+                    df = pd.concat([df, int_df], axis=1) if isinstance(df, pd.DataFrame) else pl.concat([transformed_df, int_df], how="horizontal")
+                elif 'cat' in prof_a.semantic_type or 'cat' in prof_b.semantic_type:
+                    # Generic Categorical interaction (Group Stats if mixed, or Concatenation if both categorical)
+                    if 'cat' in prof_a.semantic_type and 'cat' in prof_b.semantic_type:
+                        int_df = self.interaction_transformer.generate_categorical_interactions(df, [tuple(p)])
+                        df = pd.concat([df, int_df], axis=1) if isinstance(df, pd.DataFrame) else pl.concat([df, int_df], how="horizontal")
+                    else:
+                        cat, num = (col_a, col_b) if 'cat' in prof_a.semantic_type else (col_b, col_a)
+                        grp_df = self.interaction_transformer.generate_group_stats(df, cat, num, ["mean", "std"])
+                        df = pd.concat([df, grp_df], axis=1) if isinstance(df, pd.DataFrame) else pl.concat([df, grp_df], how="horizontal")
 
-        # Apply Explicit Group Stats
-        if self.config.selected_group_stats:
-            for item in self.config.selected_group_stats:
-                num, cat = item['num'], item['cat']
-                if num in transformed_df.columns and cat in transformed_df.columns:
-                    grp_df = self.interaction_transformer.generate_group_stats(transformed_df, cat, num, self.config.group_stats_agg or ["mean", "std"])
-                    transformed_df = pd.concat([transformed_df, grp_df], axis=1) if isinstance(transformed_df, pd.DataFrame) else pl.concat([transformed_df, grp_df], how="horizontal")
-                    all_decisions.append(DecisionRecord(column_name=f"{num}, {cat}", transform_name="group_stats", output_columns=grp_df.columns.tolist(), decision="accepted", rule_triggered="USER_APPROVED", rationale="User approved group stats."))
+                all_decisions.append(DecisionRecord(column_name=f"{col_a}, {col_b}", transform_name="interaction", output_columns=[], decision="accepted", rule_triggered="USER_APPROVED", rationale="User approved interaction."))
 
-        # Apply Explicit Polynomials
         if self.config.selected_polynomial_features:
             for item in self.config.selected_polynomial_features:
                 col_name, degree = item['col'], item['degree']
-                if col_name not in transformed_df.columns:
-                    continue
-                
                 profile = next((p for p in profiles if p.name == col_name), None)
                 if not profile: continue
                 
-                poly_val = self.numeric_transformer.apply_polynomial(transformed_df[col_name], profile, degree)
+                poly_val = self.numeric_transformer.apply_polynomial(df[col_name], profile, degree)
                 if poly_val is not None:
                     out_name = f"{col_name}_pow_{degree}"
-                    transformed_df[out_name] = poly_val
-                    all_decisions.append(DecisionRecord(column_name=col_name, transform_name=f"polynomial_d{degree}", output_columns=[out_name], decision="accepted", rule_triggered="USER_APPROVED", rationale=f"User selected polynomial degree {degree}."))
+                    df[out_name] = poly_val
+                    all_decisions.append(DecisionRecord(column_name=col_name, transform_name=f"polynomial_d{degree}", output_columns=[out_name], decision="accepted", rule_triggered="USER_APPROVED", rationale=f"Polynomial applied."))
+
+        # Re-profile after raw interactions
+        profiles = profiler.profile(df)
+        
+        fe_engine = FEEngine(self.config)
+        transformed_df, pipeline = fe_engine.transform(df, profiles, all_decisions, train_mask)
 
         # 6. Final Pass (Scoring & Leakage)
         # We need to score ALL features that are present in the final dataset.
@@ -199,6 +192,31 @@ class FeatureEngineeringAgent:
         if not skip_io and self.config.write_decision_log:
             with open(output_dir / f"decision_log_{run_id}.json", 'w', encoding='utf-8') as f:
                 json.dump(asdict(log), f, indent=2, cls=FEJSONEncoder)
+        
+        # Save Transformed Dataset
+        if not skip_io:
+            # Determine output format based on input source
+            if isinstance(source, str) and (source.lower().endswith(('.csv', '.parquet', '.pq', '.txt', '.tsv'))):
+                ext = Path(source).suffix.lower()
+                if ext == '.pq': ext = '.parquet'
+            else:
+                ext = '.csv' # Default for SQL/Dict
+
+            output_path = output_dir / f"transformed_data_{run_id}{ext}"
+
+            if isinstance(transformed_df, pd.DataFrame):
+                if ext == '.parquet':
+                    transformed_df.to_parquet(output_path, index=False)
+                elif ext in ('.txt', '.csv', '.tsv'):
+                    transformed_df.to_csv(output_path, index=False)
+            else:
+                if ext == '.parquet':
+                    transformed_df.write_parquet(output_path)
+                else:
+                    transformed_df.write_csv(output_path)
+
+            print(f"Transformed dataset saved to: {output_path}")
+
 
         return FEResult(
             transformed_df=transformed_df, decision_log=log, column_profiles=profiles,
