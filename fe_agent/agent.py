@@ -86,7 +86,7 @@ class FeatureEngineeringAgent:
         hex_id = uuid.uuid4().hex[:8]
         return f"{timestamp}_{hex_id}"
 
-    def run(self, source: Union[str, Dict[str, Any], RawDataFrame], train_mask: Optional[Any] = None) -> FEResult:
+    def run(self, source: Union[str, Dict[str, Any], RawDataFrame], train_mask: Optional[Any] = None, skip_io: bool = False) -> FEResult:
         """
         Executes the feature engineering pipeline.
         """
@@ -194,9 +194,9 @@ class FeatureEngineeringAgent:
             llm_advisory={"feature_importance_ranking": ranking_final, "llm_review": llm_advisory_data}
         )
         
-        if self.config.write_audit_report:
+        if not skip_io and self.config.write_audit_report:
             AuditReporter(run_id, output_dir).generate_report(log, profiles, transformed_df)
-        if self.config.write_decision_log:
+        if not skip_io and self.config.write_decision_log:
             with open(output_dir / f"decision_log_{run_id}.json", 'w', encoding='utf-8') as f:
                 json.dump(asdict(log), f, indent=2, cls=FEJSONEncoder)
 
