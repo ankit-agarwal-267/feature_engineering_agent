@@ -111,6 +111,7 @@ class FeatureEngineeringAgent:
 
         # 5. Apply User Selections (Interactions & Polynomials)
         new_cols_list = []
+        pipeline = FEPipeline()
         
         # Apply Interactions
         for pair in self.config.selected_interactions:
@@ -129,6 +130,7 @@ class FeatureEngineeringAgent:
                 res_df = self.interaction_transformer.generate_group_stats(df, cat, num, ["mean", "std"])
             
             new_cols_list.append(res_df)
+            pipeline.add_step(FEStep(f"inter_{col_a}_{col_b}", "interaction", [col_a, col_b], list(res_df.columns)))
             all_decisions.append(DecisionRecord(f"{col_a}, {col_b}", "interaction", list(res_df.columns), "accepted", "USER", "User selected interaction."))
 
         # Apply Polynomials
@@ -140,6 +142,7 @@ class FeatureEngineeringAgent:
                 name = f"{col}_pow_{deg}"
                 poly_df = pd.DataFrame({name: res_val}) if isinstance(df, pd.DataFrame) else pl.DataFrame({name: res_val})
                 new_cols_list.append(poly_df)
+                pipeline.add_step(FEStep(f"poly_{col}_{deg}", "polynomial", [col], [name], params={"degree": deg}))
                 all_decisions.append(DecisionRecord(col, f"polynomial_d{deg}", [name], "accepted", "USER", f"User selected degree {deg}."))
 
         # Single Concatenation to prevent fragmentation
@@ -149,9 +152,15 @@ class FeatureEngineeringAgent:
 
         # 6. Transformation (Standard Rules)
         profiles = profiler.profile(df)
-        transformed_df, pipeline = FEEngine(self.config).transform(df, profiles, all_decisions, train_mask)
+        transformed_df, pipe_standard = FEEngine(self.config).transform(df, profiles, all_decisions, train_mask)
+        # Merge standard steps into our main pipeline
+        for step in pipe_standard.steps:
+            pipeline.add_step(step)
 
         # 7. Final Assembly & Export
+        # RECORD FINAL COLUMNS
+        pipeline.set_final_columns(list(transformed_df.columns))
+        
         final_profiles = profiler.profile(transformed_df)
         ranking_final = self.scorer.score(transformed_df, self.config.target_column, final_profiles)
         leakage_warnings = self.leakage_guard.check_leakage(transformed_df, self.config.target_column)

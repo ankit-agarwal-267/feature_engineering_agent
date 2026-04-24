@@ -141,7 +141,8 @@ class FEEngine:
                     step_id=f"step_{len(pipeline.steps)}",
                     transform_name=decision.transform_name,
                     source_columns=[col_name],
-                    output_columns=list(new_cols_data)
+                    output_columns=list(new_cols_data),
+                    params={"degree": self.config.polynomial_degree} if decision.transform_name == "polynomial" else {}
                 ))
 
         # 3. Ratio pairs (Section 7.1.6)
@@ -154,6 +155,9 @@ class FEEngine:
 
         # Final cleanup: drop columns
         unique_drops = list(set(cols_to_drop))
+        if unique_drops:
+            pipeline.add_step(FEStep("final_cleanup", "drop", unique_drops, []))
+            
         if isinstance(transformed_df, pd.DataFrame):
             transformed_df = transformed_df.drop(columns=[c for c in unique_drops if c in transformed_df.columns])
         else:

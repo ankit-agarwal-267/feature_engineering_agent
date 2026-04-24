@@ -70,3 +70,15 @@ To enable it, set `llm.enabled = True` in your `FEConfig`.
   )
   ```
 *Note: Ensure your environment variable or configuration provides the necessary API key for external providers.*
+
+## Part 7 — Pipeline Serialization & Replay
+To ensure consistency between training and inference, the agent serializes every transformation step into a JSON artifact.
+
+### Replay Workflow
+1. **Fit & Save:** During a standard run on training data, the agent saves `pipeline_{run_id}.json`. This captures OHE mappings, scaling parameters, selected interactions, and the final drop list.
+2. **Apply:** To apply these identical steps to a test set (where the target variable is missing), use the `--replay` flag.
+
+```bash
+python run_agent.py --source test_data.csv --replay ./fe_output/pipeline_123.json
+```
+*Note: Replay mode operates without a target variable and does not perform predictive analysis.*

@@ -28,3 +28,9 @@ Check the `./fe_output` directory for:
 - `audit_report_{run_id}.md` - Predictive metrics, LLM advice, and feature decisions.
 - `decision_log_{run_id}.json` - Machine-readable logs.
 - `pipeline_{run_id}.json` - For replaying on new test data.
+
+## 6. Apply to Test Data
+Use the generated pipeline to transform your test set without re-running the analysis:
+```bash
+python run_agent.py --source test_data.csv --replay ./fe_output/pipeline_123.json
+```
